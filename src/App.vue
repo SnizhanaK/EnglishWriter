@@ -9,6 +9,12 @@ const pressFx =
 const BATCH_SIZE = 20
 const LOW_WATERMARK = 5
 
+const CATEGORY_SUGGESTIONS = [
+  'astronomy','geology','architecture','ecology','chemistry','gardening','sewing','photography','sailing','hardware',
+  'woodworking','electronics','optics','acoustics','robotics','navigation','shipbuilding','batteries','polymers','glassmaking',
+  'kitchenware','baking','fermentation','carpentry','masonry','plumbing','wiring','fasteners','lubricants','pigments',
+]
+
 const category = ref('')
 const apiKey = ref('')
 const isEditingCategory = ref(false)
@@ -20,6 +26,7 @@ const ruWord = ref('')
 const enWord = ref('')
 
 const isLoading = ref(false)
+const isWaitingWord = ref(false)
 const error = ref('')
 
 const confirmed = ref(false)
@@ -27,12 +34,10 @@ const selectedIndex = ref(null)
 const cursorIndex = ref(null)
 const guessChars = ref([])
 
-// batch queue (per current category)
 const queue = ref([])
 const seenEn = ref(new Set())
 const isPrefetching = ref(false)
 
-// help highlight (underline)
 const helpHintIndex = ref(null)
 let helpHintTimer = null
 
@@ -47,6 +52,8 @@ const focusCategory = async () => {
   categoryInput.value?.focus?.()
   categoryInput.value?.select?.()
 }
+
+const normalizeCategory = (v) => String(v || '').trim().toLowerCase()
 
 const targetChars = computed(() => (enWord.value || '').split(''))
 const letterIndices = computed(() =>
@@ -70,6 +77,16 @@ const statusByIndex = computed(() =>
       return g.toLowerCase() === ch.toLowerCase() ? 'correct' : 'wrong'
     }),
 )
+
+const isAllCorrect = computed(() => {
+  if (!enWord.value) return false
+  return targetChars.value.every((ch, i) => {
+    if (ch === ' ') return true
+    const g = guessChars.value[i]
+    if (!g) return false
+    return g.toLowerCase() === ch.toLowerCase()
+  })
+})
 
 const moveCursorToNext = (fromIndex) => {
   const pos = letterIndices.value.indexOf(fromIndex)
@@ -111,12 +128,6 @@ const onClickSlot = (i) => {
   blurAll()
 }
 
-const onEdit = async () => {
-  isEditingCategory.value = !isEditingCategory.value
-  if (isEditingCategory.value) await focusCategory()
-  else blurAll()
-}
-
 const ensureKey = () => {
   if (!apiKey.value.trim()) {
     error.value = 'Нужен API key'
@@ -134,7 +145,7 @@ const prefetch = async () => {
   if (isPrefetching.value) return
   if (!ensureKey()) return
 
-  const cat = category.value.trim().toLowerCase()
+  const cat = normalizeCategory(category.value)
   if (!cat) return
 
   isPrefetching.value = true
@@ -162,15 +173,10 @@ const prefetch = async () => {
 }
 
 const takeFromQueue = async () => {
-  if (queue.value.length === 0) {
-    await prefetch()
-  }
+  if (queue.value.length === 0) await prefetch()
   const item = queue.value.shift()
   if (!item) throw new Error('Нет слов')
-
-  if (queue.value.length <= LOW_WATERMARK) {
-    prefetch()
-  }
+  if (queue.value.length <= LOW_WATERMARK) prefetch()
   return item
 }
 
@@ -187,10 +193,11 @@ const onRandom = async () => {
   error.value = ''
   if (!ensureKey()) return
 
+  isWaitingWord.value = true
   isLoading.value = true
   try {
     const r = await generateWordPair({ apiKey: apiKey.value, category: '' })
-    category.value = (r.category || '').trim().toLowerCase()
+    category.value = normalizeCategory(r.category || '')
     setPair(r)
 
     resetQueue()
@@ -199,18 +206,21 @@ const onRandom = async () => {
     error.value = e?.message || 'Gemini error'
   } finally {
     isLoading.value = false
+    isWaitingWord.value = false
   }
 }
 
 const onNext = async () => {
   error.value = ''
   if (!ensureKey()) return
-  const cat = category.value.trim().toLowerCase()
+
+  const cat = normalizeCategory(category.value)
   if (!cat) {
     error.value = 'Категория пустая'
     return
   }
 
+  isWaitingWord.value = true
   isLoading.value = true
   try {
     const item = await takeFromQueue()
@@ -220,7 +230,37 @@ const onNext = async () => {
     error.value = e?.message || 'Gemini error'
   } finally {
     isLoading.value = false
+    isWaitingWord.value = false
   }
+}
+
+const applyCategoryAndLoad = async () => {
+  const cat = normalizeCategory(category.value)
+  category.value = cat
+  isEditingCategory.value = false
+  blurAll()
+
+  resetQueue()
+
+  if (!cat) return
+
+  isWaitingWord.value = true
+  isLoading.value = true
+  try {
+    await prefetch()
+    const item = await takeFromQueue()
+    setPair(item)
+  } catch (e) {
+    error.value = e?.message || 'Gemini error'
+  } finally {
+    isLoading.value = false
+    isWaitingWord.value = false
+  }
+}
+
+const onEdit = async () => {
+  isEditingCategory.value = true
+  await focusCategory()
 }
 
 const onClean = () => {
@@ -237,8 +277,8 @@ const onClean = () => {
 
 const onHelp = () => {
   confirmed.value = false
+  clearHelpHint()
 
-  // 1) if there is a wrong typed letter -> FIX it (write correct char permanently)
   const wrongIdx = targetChars.value.findIndex((ch, i) => {
     if (ch === ' ') return false
     const g = guessChars.value[i]
@@ -255,7 +295,6 @@ const onHelp = () => {
     return
   }
 
-  // 2) otherwise fill next missing letter
   const emptyIdx = targetChars.value.findIndex((ch, i) => ch !== ' ' && !guessChars.value[i])
   if (emptyIdx === -1) return
 
@@ -270,6 +309,25 @@ const onConfirm = () => {
   confirmed.value = true
   blurAll()
 }
+
+// auto-next when confirmed and all correct
+let autoNextTimer = null
+watch(
+    () => [confirmed.value, isAllCorrect.value, isLoading.value, enWord.value],
+    ([isConfirmed, allCorrect, loading]) => {
+      if (!isConfirmed) return
+      if (!allCorrect) return
+      if (loading) return
+      if (!enWord.value) return
+
+      if (autoNextTimer) clearTimeout(autoNextTimer)
+      autoNextTimer = setTimeout(() => {
+        if (confirmed.value && isAllCorrect.value && !isLoading.value) {
+          onNext()
+        }
+      }, 350)
+    }
+)
 
 const onEnter = async (e) => {
   if (isLoading.value) return
@@ -300,10 +358,7 @@ const onKeydown = async (e) => {
   const el = document.activeElement
 
   const isOurInput = el === categoryInput.value || el === keyInput.value
-  if (isOurInput) {
-    if (el === categoryInput.value && isEditingCategory.value) return
-    blurAll()
-  }
+  if (isOurInput) return
 
   if (key === 'Enter') {
     await onEnter(e)
@@ -360,18 +415,11 @@ const onKeydown = async (e) => {
   }
 }
 
-watch(
-    () => category.value,
-    () => {
-      resetQueue()
-      if (category.value.trim()) prefetch()
-    }
-)
-
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   if (helpHintTimer) clearTimeout(helpHintTimer)
+  if (autoNextTimer) clearTimeout(autoNextTimer)
 })
 </script>
 
@@ -398,11 +446,17 @@ onBeforeUnmount(() => {
                 ref="categoryInput"
                 v-model="category"
                 :readonly="!isEditingCategory"
+                :list="isEditingCategory ? 'category-list' : null"
                 type="text"
                 class="w-full outline-none bg-transparent text-center"
                 placeholder="Category"
-                @keydown.enter.prevent="() => { isEditingCategory = false; blurAll() }"
+                @change="applyCategoryAndLoad"
+                @blur="() => isEditingCategory && applyCategoryAndLoad()"
+                @keydown.enter.prevent="applyCategoryAndLoad"
             />
+            <datalist id="category-list">
+              <option v-for="c in CATEGORY_SUGGESTIONS" :key="c" :value="c" />
+            </datalist>
           </div>
 
           <button @click="onEdit" class="p-2 border border-black" :class="pressFx">
@@ -488,6 +542,16 @@ onBeforeUnmount(() => {
           Next
         </button>
       </div>
+
+      <div class="flex justify-center -mt-2 pb-2 h-6">
+        <div v-if="isWaitingWord" class="loading-dots" aria-label="loading">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -499,5 +563,30 @@ button:focus-visible {
 }
 * {
   -webkit-tap-highlight-color: transparent;
+}
+
+.loading-dots {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.loading-dots .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #000;
+  opacity: 0.2;
+  animation: dotPulse 1s infinite ease-in-out;
+}
+
+.loading-dots .dot:nth-child(2) { animation-delay: 0.12s; }
+.loading-dots .dot:nth-child(3) { animation-delay: 0.24s; }
+.loading-dots .dot:nth-child(4) { animation-delay: 0.36s; }
+.loading-dots .dot:nth-child(5) { animation-delay: 0.48s; }
+
+@keyframes dotPulse {
+  0%, 100% { opacity: 0.2; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
 }
 </style>
