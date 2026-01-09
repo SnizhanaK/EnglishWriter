@@ -6,6 +6,7 @@ import IconsResolver from 'unplugin-icons/resolver'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
+  base: '/EnglishWriter/',
   plugins: [
     vue(),
     tailwindcss(),
