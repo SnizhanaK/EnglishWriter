@@ -9,195 +9,32 @@ const pressFx =
 // batching
 const PREFETCH_BATCH = 30
 const LOW_WATERMARK = 8
+const PRIME_BATCH = 10 // ✅ always fetch 10 first for new context
 
-// adaptive rules
+// adaptive rules (kept for Round/Score display)
 const WARMUP_SIZE = 10
 const STEP_HARD_SIZE = 30
 const LOOP_SIZE = 40
 const PASS_RATE = 0.8
 
 const CATEGORY_SUGGESTIONS = [
-  // Everyday & basics
-  'everyday life',
-  'daily activities',
-  'common objects',
-  'things around you',
-  'places',
-  'time',
-  'weather',
-  'numbers',
-  'colors',
-  'shapes',
-
-  // People & body
-  'body',
-  'body parts',
-  'health',
-  'illness',
-  'appearance',
-  'clothing',
-  'accessories',
-  'emotions',
-  'feelings',
-  'personality',
-  'relationships',
-  'family',
-
-  // Conversation & language
-  'conversation',
-  'spoken english',
-  'everyday phrases',
-  'common expressions',
-  'reactions',
-  'opinions',
-  'questions',
-  'answers',
-  'polite phrases',
-  'informal speech',
-  'slang',
-
-  // Actions & states
-  'actions',
-  'movements',
-  'states',
-  'changes',
-  'habits',
-  'problems',
-  'solutions',
-
-  // Home & lifestyle
-  'home',
-  'household items',
-  'rooms',
-  'furniture',
-  'cleaning',
-  'repairs',
-  'tools',
-  'kitchen',
-  'kitchenware',
-  'appliances',
-  'bathroom',
-
-  // Food & drinks
-  'food',
-  'meals',
-  'ingredients',
-  'cooking',
-  'baking',
-  'drinks',
-  'fruits',
-  'vegetables',
-  'snacks',
-  'desserts',
-
-  // Nature & living things
-  'animals',
-  'pets',
-  'wild animals',
-  'plants',
-  'trees',
-  'flowers',
-  'nature',
-  'environment',
-
-  // City & travel
-  'transport',
-  'vehicles',
-  'streets',
-  'directions',
-  'travel',
-  'tourism',
-  'hotels',
-  'restaurants',
-  'airports',
-
-  // Work & education
-  'work',
-  'jobs',
-  'professions',
-  'office',
-  'meetings',
-  'education',
-  'school',
-  'university',
-  'learning',
-
-  // Business & money
-  'business',
-  'finance',
-  'money',
-  'banking',
-  'payments',
-  'shopping',
-  'online shopping',
-  'services',
-
-  // Technology & IT
-  'technology',
-  'computers',
-  'hardware',
-  'software',
-  'programming',
-  'coding basics',
-  'web development',
-  'frontend',
-  'backend',
-  'databases',
-  'apis',
-  'testing',
-  'debugging',
-  'version control',
-  'git',
-  'devops',
-  'cloud computing',
-  'operating systems',
-  'linux',
-  'mobile apps',
-  'cybersecurity',
-  'ai',
-  'machine learning',
-
-  // Internet & digital life
-  'internet',
-  'websites',
-  'browsers',
-  'search',
-  'email',
-  'messaging',
-  'social media',
-  'online communication',
-  'content creation',
-
-  // Devices & gadgets
-  'devices',
-  'gadgets',
-  'smartphones',
-  'laptops',
-  'tablets',
-  'wearables',
-
-  // Entertainment & hobbies
-  'hobbies',
-  'free time',
-  'sports',
-  'fitness',
-  'games',
-  'video games',
-  'music',
-  'movies',
-  'tv shows',
-  'books',
-  'reading',
-
-  // Abstract but useful
-  'qualities',
-  'character traits',
-  'advantages',
-  'disadvantages',
-  'goals',
-  'plans',
-  'decisions',
-  'results'
+  'everyday life','daily activities','common objects','things around you','places','time','weather','numbers','colors','shapes',
+  'body','body parts','health','appearance','clothing','accessories','emotions','feelings','personality','relationships','family',
+  'conversation','spoken english','everyday phrases','common expressions','reactions','opinions','questions','answers','polite phrases','informal speech','slang',
+  'actions','movements','states','changes','habits','problems','solutions',
+  'home','household items','rooms','furniture','cleaning','repairs','tools','kitchen','kitchenware','appliances','bathroom',
+  'food','meals','ingredients','cooking','baking','drinks','fruits','vegetables','snacks','desserts',
+  'animals','pets','wild animals','plants','trees','flowers','nature','environment',
+  'transport','vehicles','streets','directions','travel','tourism','hotels','restaurants','airports',
+  'work','jobs','professions','office','meetings','education','school','university','learning',
+  'business','finance','money','banking','payments','shopping','online shopping','services',
+  'technology','computers','hardware','software','programming','coding basics','web development','frontend','backend','databases','apis',
+  'testing','debugging','version control','git','devops','cloud computing','operating systems','linux','mobile apps',
+  'cybersecurity','ai','machine learning',
+  'internet','websites','browsers','search','email','messaging','social media','online communication','content creation',
+  'devices','gadgets','smartphones','laptops','tablets','wearables',
+  'hobbies','free time','sports','fitness','games','video games','music','movies','tv shows','books','reading',
+  'qualities','character traits','advantages','disadvantages','goals','plans','decisions','results',
 ]
 
 // random picker (stable)
@@ -207,10 +44,36 @@ const pickRandom = (arr) => {
   return arr[n % arr.length]
 }
 
+const normalizeCategory = (v) => String(v || '').trim().toLowerCase()
+const normalizeSpaces = (s) => String(s || '').replace(/\s+/g, ' ').trim()
+const normalizeDashes = (s) =>
+    String(s || '')
+        .replace(/[‐-‒–—−]/g, '-') // dash variants -> '-'
+        .replace(/\s*-\s*/g, '-') // remove spaces around '-'
+
+const normalizePair = (ru, en) => {
+  const ruN = normalizeSpaces(normalizeDashes(ru))
+  const enN = normalizeSpaces(normalizeDashes(en)).toLowerCase()
+  return { ru: ruN, en: enN }
+}
+
+// ✅ allow phrases + hyphens + apostrophes in EN
+const isValidEnglish = (en) => {
+  const s = normalizeSpaces(normalizeDashes(en)).toLowerCase()
+  // letters, spaces, hyphens, apostrophes
+  return /^[a-z]+(?:[ '-][a-z]+)*$/.test(s)
+}
+
+const isLetter = (ch) => /^[a-zA-Z]$/.test(ch)
+
 const category = ref('')
 const apiKey = ref('')
 const isApiKeyVisible = ref(false)
 const isEditingCategory = ref(false)
+
+// user-selected difficulty; reset to medium on category change
+const difficulty = ref('medium') // 'easy' | 'medium' | 'hard'
+const suppressDifficultyWatch = ref(false)
 
 const categoryInput = ref(null)
 const keyInput = ref(null)
@@ -222,7 +85,7 @@ const isLoading = ref(false)
 const isWaitingWord = ref(false)
 const error = ref('')
 
-// unified lock to prevent races between change/blur/enter/skip/random
+// unified lock to prevent races
 const loadLock = ref(false)
 
 // scoring / word state
@@ -234,13 +97,13 @@ const guessChars = ref([])
 const usedHelpForWord = ref(false)
 const confirmAttemptsForWord = ref(0)
 const confirmTick = ref(0)
-const wordCompleted = ref(false) // ✅ prevents double-decrement / double-score / double-next
+const wordCompleted = ref(false)
 
 // global no-repeat across session
 const seenEn = ref(new Set())
 
-// queue
-const queue = ref([])
+// queue keyed by category+difficulty
+const queueMeta = ref({ key: '', items: [] })
 const isPrefetching = ref(false)
 
 // help underline
@@ -253,15 +116,21 @@ let autoNextTimer = null
 // run token to ignore stale async results
 const runId = ref(0)
 
-// adaptive stage state
+// stage state (kept for Round/Score display)
 const stage = ref({
-  difficulty: 'medium', // easy | medium | hard
+  difficulty: 'medium',
   remaining: WARMUP_SIZE,
   total: WARMUP_SIZE,
-  correct: 0, // SCORE (only first-try, no-help)
-  phase: 'warmup', // warmup | step | loop
+  correct: 0,
+  phase: 'warmup',
 })
 const roundNumber = ref(1)
+
+// queue context key
+const queueKey = computed(() => `${normalizeCategory(category.value)}|${difficulty.value}`)
+
+// show 5 dots for any network activity
+const showLoadingDots = computed(() => isWaitingWord.value || isPrefetching.value)
 
 const blurAll = () => {
   categoryInput.value?.blur?.()
@@ -275,14 +144,12 @@ const focusCategory = async () => {
   categoryInput.value?.select?.()
 }
 
-const normalizeCategory = (v) => String(v || '').trim().toLowerCase()
-
-const isLetter = (ch) => /^[a-zA-Z]$/.test(ch)
-
 const targetChars = computed(() => (enWord.value || '').split(''))
+
+// ✅ only letters are "fillable" slots; spaces are gaps; hyphens/apostrophes are fixed chars
 const letterIndices = computed(() =>
     targetChars.value
-        .map((ch, i) => (ch === ' ' ? null : i))
+        .map((ch, i) => (isLetter(ch) ? i : null))
         .filter((x) => x !== null),
 )
 
@@ -302,7 +169,7 @@ const resetAll = () => {
   selectedIndex.value = null
   cursorIndex.value = letterIndices.value[0] ?? null
 
-  // ✅ auto-fill punctuation/non-letters so words are always solvable
+  // auto-fill fixed characters (hyphen, apostrophe, punctuation) and spaces
   guessChars.value = targetChars.value.map((ch) => {
     if (ch === ' ') return ' '
     if (!isLetter(ch)) return ch
@@ -313,14 +180,13 @@ const resetAll = () => {
   confirmAttemptsForWord.value = 0
   wordCompleted.value = false
 }
-
 watch(enWord, resetAll, { immediate: true })
 
 const statusByIndex = computed(() =>
     targetChars.value.map((ch, i) => {
       if (ch === ' ') return 'space'
       if (!confirmed.value) return 'idle'
-      if (!isLetter(ch)) return 'correct' // punctuation treated as fixed/correct
+      if (!isLetter(ch)) return 'correct'
       const g = guessChars.value[i] || ''
       if (!g) return 'empty'
       return g.toLowerCase() === ch.toLowerCase() ? 'correct' : 'wrong'
@@ -366,7 +232,7 @@ const hintIndex = (i) => {
 
 const onClickSlot = (i) => {
   if (targetChars.value[i] === ' ') return
-  if (!isLetter(targetChars.value[i])) return // punctuation not selectable
+  if (!isLetter(targetChars.value[i])) return
   clearHelpHint()
   selectedIndex.value = i
   cursorIndex.value = i
@@ -374,7 +240,6 @@ const onClickSlot = (i) => {
 }
 
 const hasKey = () => !!apiKey.value.trim()
-
 const ensureKeyOrShowError = () => {
   if (!hasKey()) {
     error.value = 'Нужен API key'
@@ -383,20 +248,14 @@ const ensureKeyOrShowError = () => {
   return true
 }
 
-const resetQueue = () => {
-  queue.value = []
-}
-
-const stageSet = (difficulty, count, phase, { incRound = true } = {}) => {
-  stage.value = { difficulty, remaining: count, total: count, correct: 0, phase }
+const stageSet = (difficultyName, count, phase, { incRound = true } = {}) => {
+  stage.value = { difficulty: difficultyName, remaining: count, total: count, correct: 0, phase }
   if (incRound) roundNumber.value += 1
 }
-
 const stageInit = () => {
   roundNumber.value = 1
   stage.value = { difficulty: 'medium', remaining: WARMUP_SIZE, total: WARMUP_SIZE, correct: 0, phase: 'warmup' }
 }
-
 const stageFinishAndAdvance = () => {
   const s = stage.value
   const rate = s.total ? s.correct / s.total : 0
@@ -417,13 +276,220 @@ const stageFinishAndAdvance = () => {
   else stageSet('easy', LOOP_SIZE, 'loop')
 }
 
+// queue helpers
+const resetQueue = () => {
+  queueMeta.value = { key: queueKey.value, items: [] }
+}
+const ensureQueueKey = () => {
+  const k = queueKey.value
+  if (queueMeta.value.key !== k) queueMeta.value = { key: k, items: [] }
+}
+
+const setPair = (r) => {
+  error.value = ''
+  ruWord.value = r.ru
+  enWord.value = r.en
+  confirmed.value = false
+  clearHelpHint()
+  clearAutoNext()
+  blurAll()
+}
+
+const sanitizeBatch = (batch) => {
+  const seen = seenEn.value
+  const out = []
+
+  for (const it of batch || []) {
+    const rawEn = String(it?.en || '')
+    const rawRu = String(it?.ru || '')
+    const { en, ru } = normalizePair(rawRu, rawEn)
+
+    if (!en || !ru) continue
+    if (!isValidEnglish(en)) continue
+    if (seen.has(en)) continue
+
+    seen.add(en)
+    out.push({ en, ru })
+  }
+
+  return out
+}
+
+// ✅ fast 1-word fetch to avoid long pause between words
+const fetchOneFast = async () => {
+  const myRun = runId.value
+  const myKey = queueKey.value
+  const cat = normalizeCategory(category.value)
+
+  const batch = await generateWordBatch({
+    apiKey: apiKey.value,
+    category: cat || '',
+    count: 1,
+    difficulty: difficulty.value,
+  })
+
+  if (myRun !== runId.value) return null
+  if (myKey !== queueKey.value) return null
+
+  const filtered = sanitizeBatch(batch)
+  return filtered[0] || null
+}
+
+// prime: fetch 10, show first, queue rest, then bg prefetch
+const primeQueueAndShowFirst = async ({ count = PRIME_BATCH } = {}) => {
+  if (!ensureKeyOrShowError()) return false
+
+  ensureQueueKey()
+  const myRun = runId.value
+  const myKey = queueKey.value
+  const cat = normalizeCategory(category.value)
+
+  isWaitingWord.value = true
+  isLoading.value = true
+  try {
+    const batch = await generateWordBatch({
+      apiKey: apiKey.value,
+      category: cat || '',
+      count,
+      difficulty: difficulty.value,
+    })
+
+    if (myRun !== runId.value) return false
+    if (myKey !== queueKey.value) return false
+
+    ensureQueueKey()
+    if (queueMeta.value.key !== myKey) return false
+
+    const filtered = sanitizeBatch(batch)
+    if (!filtered.length) throw new Error('Нет слов')
+
+    const [first, ...rest] = filtered
+    queueMeta.value.items = rest
+    setPair(first)
+
+    prefetch() // bg
+    return true
+  } catch (e) {
+    if (!ruWord.value && !enWord.value) error.value = e?.message || 'Ошибка загрузки'
+    return false
+  } finally {
+    if (myRun === runId.value && myKey === queueKey.value) {
+      isLoading.value = false
+      isWaitingWord.value = false
+    }
+  }
+}
+
+// prefetch batch into queue (background)
+const prefetch = async () => {
+  if (isPrefetching.value) return
+  if (!hasKey()) return
+
+  ensureQueueKey()
+  const myRun = runId.value
+  const myKey = queueKey.value
+  const cat = normalizeCategory(category.value)
+
+  isPrefetching.value = true
+  try {
+    let attempts = 0
+    while (queueMeta.value.items.length < PREFETCH_BATCH && attempts < 3) {
+      attempts += 1
+      const batch = await generateWordBatch({
+        apiKey: apiKey.value,
+        category: cat || '',
+        count: PREFETCH_BATCH,
+        difficulty: difficulty.value,
+      })
+
+      if (myRun !== runId.value) return
+      if (myKey !== queueKey.value) return
+      ensureQueueKey()
+      if (queueMeta.value.key !== myKey) return
+
+      const filtered = sanitizeBatch(batch)
+      queueMeta.value.items.push(...filtered)
+      if (filtered.length > 0) break
+    }
+  } catch (e) {
+    console.warn(e)
+  } finally {
+    isPrefetching.value = false
+  }
+}
+
+const takeFromQueue = async () => {
+  ensureQueueKey()
+
+  if (queueMeta.value.items.length > 0) {
+    const item = queueMeta.value.items.shift()
+    if (queueMeta.value.items.length <= LOW_WATERMARK) prefetch()
+    return item
+  }
+
+  const one = await fetchOneFast()
+  if (one) {
+    prefetch()
+    return one
+  }
+
+  await prefetch()
+  ensureQueueKey()
+
+  const item = queueMeta.value.items.shift()
+  if (!item) throw new Error('Нет слов')
+
+  if (queueMeta.value.items.length <= LOW_WATERMARK) prefetch()
+  return item
+}
+
+const loadNextWord = async () => {
+  error.value = ''
+  if (!ensureKeyOrShowError()) return false
+
+  const myRun = runId.value
+  const myKey = queueKey.value
+
+  isWaitingWord.value = true
+  isLoading.value = true
+  try {
+    if (stage.value.remaining <= 0) {
+      stageFinishAndAdvance()
+      resetQueue()
+    }
+
+    const item = await takeFromQueue()
+    if (myRun !== runId.value) return false
+    if (myKey !== queueKey.value) return false
+
+    setPair(item)
+    return true
+  } catch (e) {
+    if (myRun !== runId.value) return false
+    if (myKey !== queueKey.value) return false
+    if (!ruWord.value && !enWord.value) error.value = e?.message || 'Ошибка загрузки'
+    return false
+  } finally {
+    if (myRun === runId.value && myKey === queueKey.value) {
+      isLoading.value = false
+      isWaitingWord.value = false
+    }
+  }
+}
+
 // hard reset (always when category changes / random)
 const startNewRun = (newCategory) => {
-  runId.value += 1 // ✅ invalidate all inflight async
+  runId.value += 1
   clearAutoNext()
   clearHelpHint()
 
   category.value = normalizeCategory(newCategory || category.value)
+
+  suppressDifficultyWatch.value = true
+  difficulty.value = 'medium'
+  queueMeta.value = { key: `${normalizeCategory(category.value)}|medium`, items: [] }
+  queueMeta.value.key = queueKey.value
+  suppressDifficultyWatch.value = false
 
   seenEn.value = new Set()
   resetQueue()
@@ -437,146 +503,23 @@ const startNewRun = (newCategory) => {
   blurAll()
 }
 
-// prefetch batch into queue (background)
-const prefetch = async () => {
-  if (isPrefetching.value) return
-  if (!hasKey()) return // ✅ silent for background
-
-  const myRun = runId.value
-  const cat = normalizeCategory(category.value)
-  const diff = stage.value.difficulty
-
-  isPrefetching.value = true
-  try {
-    let attempts = 0
-    while (queue.value.length < PREFETCH_BATCH && attempts < 3) {
-      attempts += 1
-      const batch = await generateWordBatch({
-        apiKey: apiKey.value,
-        category: cat || '',
-        count: PREFETCH_BATCH,
-        difficulty: diff,
-      })
-
-      if (myRun !== runId.value) return // ✅ stale response
-
-      const seen = seenEn.value
-      const filtered = []
-      for (const it of batch) {
-        if (!it?.en) continue
-        if (seen.has(it.en)) continue
-        seen.add(it.en)
-        filtered.push(it)
-      }
-
-      queue.value.push(...filtered)
-      if (filtered.length > 0) break
-    }
-  } catch (e) {
-    console.warn(e)
-  } finally {
-    isPrefetching.value = false
-  }
-}
-
-const takeFromQueue = async () => {
-  if (queue.value.length === 0) await prefetch()
-  const item = queue.value.shift()
-  if (!item) throw new Error('Нет слов')
-  if (queue.value.length <= LOW_WATERMARK) prefetch()
-  return item
-}
-
-const setPair = (r) => {
-  error.value = '' // clear old errors
-  ruWord.value = r.ru
-  enWord.value = r.en
-  confirmed.value = false
-  clearHelpHint()
-  clearAutoNext()
-  blurAll()
-}
-
-// normal next word from queue/batch
-const loadNextWord = async () => {
-  error.value = ''
-  if (!ensureKeyOrShowError()) return
-
-  const myRun = runId.value
-
-  isWaitingWord.value = true
-  isLoading.value = true
-  try {
-    if (stage.value.remaining <= 0) {
-      stageFinishAndAdvance()
-      resetQueue()
-    }
-
-    const item = await takeFromQueue()
-    if (myRun !== runId.value) return // ✅ stale load
-
-    setPair(item)
-  } catch (e) {
-    if (myRun !== runId.value) return
-    error.value = e?.message || 'Gemini error'
-  } finally {
-    if (myRun === runId.value) {
-      isLoading.value = false
-      isWaitingWord.value = false
-    }
-  }
-}
-
-const getOneUniqueWord = async ({ category: cat, difficulty: diff, tries = 3 } = {}) => {
-  const myRun = runId.value
-  for (let i = 0; i < tries; i += 1) {
-    const batch = await generateWordBatch({
-      apiKey: apiKey.value,
-      category: cat || '',
-      count: 1,
-      difficulty: diff,
-    })
-    if (myRun !== runId.value) return null
-    const item = batch?.[0]
-    if (!item?.en) continue
-    if (seenEn.value.has(item.en)) continue
-    seenEn.value.add(item.en)
-    return item
-  }
-  return null
-}
-
-// ✅ Random: choose category locally, reset everything, then get one word fast + prefetch in bg
+// Random: choose category, reset to medium, prime 10
 const onRandom = async () => {
   if (loadLock.value) return
   if (!ensureKeyOrShowError()) return
 
   loadLock.value = true
-  isWaitingWord.value = true
-  isLoading.value = true
   error.value = ''
 
   try {
     startNewRun(pickRandom(CATEGORY_SUGGESTIONS))
-
-    const item = await getOneUniqueWord({
-      category: category.value,
-      difficulty: stage.value.difficulty,
-    })
-    if (!item) throw new Error('Нет слов')
-
-    setPair(item)
-    prefetch()
-  } catch (e) {
-    error.value = e?.message || 'Ошибка загрузки'
+    await primeQueueAndShowFirst({ count: PRIME_BATCH })
   } finally {
-    isLoading.value = false
-    isWaitingWord.value = false
     loadLock.value = false
   }
 }
 
-// ✅ Pencil apply: same logic (fast 1 word + bg prefetch)
+// Pencil apply: reset to medium, prime 10
 const applyCategoryAndLoad = async () => {
   if (loadLock.value) return
   if (!ensureKeyOrShowError()) return
@@ -584,32 +527,12 @@ const applyCategoryAndLoad = async () => {
   loadLock.value = true
   isEditingCategory.value = false
   blurAll()
-
-  const myRunBefore = runId.value
-
-  isWaitingWord.value = true
-  isLoading.value = true
   error.value = ''
 
   try {
     startNewRun(category.value)
-
-    // if startNewRun bumped runId, use new one
-    if (myRunBefore === runId.value) runId.value += 1
-
-    const item = await getOneUniqueWord({
-      category: category.value,
-      difficulty: stage.value.difficulty,
-    })
-    if (!item) throw new Error('Нет слов')
-
-    setPair(item)
-    prefetch()
-  } catch (e) {
-    error.value = e?.message || 'Ошибка загрузки'
+    await primeQueueAndShowFirst({ count: PRIME_BATCH })
   } finally {
-    isLoading.value = false
-    isWaitingWord.value = false
     loadLock.value = false
   }
 }
@@ -618,6 +541,28 @@ const onEdit = async () => {
   isEditingCategory.value = true
   await focusCategory()
 }
+
+// when user changes difficulty: same category, reload immediately with PRIME_BATCH=10
+watch(difficulty, async () => {
+  if (suppressDifficultyWatch.value) return
+
+  resetQueue()
+  runId.value += 1
+  clearAutoNext()
+  clearHelpHint()
+  error.value = ''
+
+  if (!hasKey()) return
+  if (loadLock.value) return
+  if (!category.value) return
+
+  loadLock.value = true
+  try {
+    await primeQueueAndShowFirst({ count: PRIME_BATCH })
+  } finally {
+    loadLock.value = false
+  }
+})
 
 const onHelp = () => {
   if (!enWord.value) return
@@ -628,7 +573,6 @@ const onHelp = () => {
   clearAutoNext()
 
   const wrongIdx = targetChars.value.findIndex((ch, i) => {
-    if (ch === ' ') return false
     if (!isLetter(ch)) return false
     const g = guessChars.value[i]
     if (!g) return false
@@ -644,7 +588,7 @@ const onHelp = () => {
     return
   }
 
-  const emptyIdx = targetChars.value.findIndex((ch, i) => ch !== ' ' && isLetter(ch) && !guessChars.value[i])
+  const emptyIdx = targetChars.value.findIndex((ch, i) => isLetter(ch) && !guessChars.value[i])
   if (emptyIdx === -1) return
 
   guessChars.value[emptyIdx] = targetChars.value[emptyIdx].toLowerCase()
@@ -659,10 +603,8 @@ const onClean = () => {
   clearHelpHint()
   clearAutoNext()
 
-  if (selectedIndex.value !== null && targetChars.value[selectedIndex.value] !== ' ') {
-    if (isLetter(targetChars.value[selectedIndex.value])) {
-      guessChars.value[selectedIndex.value] = ''
-    }
+  if (selectedIndex.value !== null) {
+    if (isLetter(targetChars.value[selectedIndex.value])) guessChars.value[selectedIndex.value] = ''
     selectedIndex.value = null
     return
   }
@@ -677,53 +619,47 @@ const onConfirm = () => {
   blurAll()
 }
 
-// ✅ Next = Skip
+// Next = Skip (does not change remaining if next didn't load)
 const onSkip = async () => {
   if (loadLock.value) return
   if (!ensureKeyOrShowError()) return
   if (!enWord.value) return
 
   loadLock.value = true
-
-  // skip never counts to score
   usedHelpForWord.value = true
   confirmed.value = false
   clearHelpHint()
   clearAutoNext()
-  wordCompleted.value = true // ✅ ensure no watcher completion fires for this word
-
-  stage.value.remaining -= 1
+  wordCompleted.value = true
 
   try {
-    await loadNextWord()
+    const ok = await loadNextWord()
+    if (ok) stage.value.remaining -= 1
+    else wordCompleted.value = false
   } finally {
     loadLock.value = false
   }
 }
 
-// ✅ only auto-next if ALL GREEN; score only if first confirm and no help
+// auto-next if ALL GREEN; score only if first confirm and no help
 watch(
     () => [confirmTick.value, isAllCorrect.value, isLoading.value, enWord.value],
     ([, allCorrect, loading]) => {
       if (loading || !enWord.value) return
       if (!confirmed.value) return
       if (!allCorrect) return
-      if (wordCompleted.value) return // ✅ prevents double-decrement/score
+      if (wordCompleted.value) return
 
       wordCompleted.value = true
       stage.value.remaining -= 1
 
       const firstTry = confirmAttemptsForWord.value === 1
       const noHelp = !usedHelpForWord.value
-      if (firstTry && noHelp) {
-        stage.value.correct += 1
-      }
+      if (firstTry && noHelp) stage.value.correct += 1
 
       clearAutoNext()
       autoNextTimer = setTimeout(() => {
-        if (confirmed.value && !isLoading.value && !loadLock.value) {
-          loadNextWord()
-        }
+        if (confirmed.value && !isLoading.value && !loadLock.value) loadNextWord()
       }, 350)
     }
 )
@@ -774,9 +710,7 @@ const onKeydown = async (e) => {
     clearAutoNext()
 
     if (selectedIndex.value !== null) {
-      if (isLetter(targetChars.value[selectedIndex.value])) {
-        guessChars.value[selectedIndex.value] = ''
-      }
+      if (isLetter(targetChars.value[selectedIndex.value])) guessChars.value[selectedIndex.value] = ''
       return
     }
 
@@ -792,16 +726,31 @@ const onKeydown = async (e) => {
     return
   }
 
+  // letters
   if (/^[a-zA-Z]$/.test(key)) {
     e.preventDefault()
     confirmed.value = false
     clearHelpHint()
     clearAutoNext()
 
-    // ignore typing into punctuation slots (shouldn't happen, but safe)
     if (!isLetter(targetChars.value[idx])) return
 
     guessChars.value[idx] = key.toLowerCase()
+    selectedIndex.value = null
+    moveCursorToNext(idx)
+    return
+  }
+
+  // ✅ allow typing '-' or "'" only if target expects it (usually auto-filled anyway)
+  if (key === '-' || key === "'") {
+    if (targetChars.value[idx] !== key) return
+
+    e.preventDefault()
+    confirmed.value = false
+    clearHelpHint()
+    clearAutoNext()
+
+    guessChars.value[idx] = key
     selectedIndex.value = null
     moveCursorToNext(idx)
   }
@@ -876,8 +825,18 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="mt-3 text-xs sm:text-sm font-light">
-          Difficulty: {{ stage.difficulty }}, Round: {{ roundNumber }}, Score: {{ stage.correct }}/{{ stage.total }}
+        <div class="mt-3 text-xs sm:text-sm font-light flex flex-wrap items-center gap-3">
+          <div class="flex items-center gap-2">
+            <span>Difficulty:</span>
+            <select v-model="difficulty" class="border border-black bg-transparent px-2 py-1" title="Select difficulty">
+              <option value="easy">easy</option>
+              <option value="medium">medium</option>
+              <option value="hard">hard</option>
+            </select>
+          </div>
+
+          <div>Round: {{ roundNumber }}</div>
+          <div>Score: {{ stage.correct }}/{{ stage.total }}</div>
         </div>
       </div>
 
@@ -948,7 +907,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="flex justify-center -mt-2 pb-2 h-6">
-        <div v-if="isWaitingWord" class="loading-dots" aria-label="loading">
+        <div v-if="showLoadingDots" class="loading-dots" aria-label="loading">
           <span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
         </div>
       </div>
@@ -964,7 +923,6 @@ button:focus-visible {
 * {
   -webkit-tap-highlight-color: transparent;
 }
-
 .loading-dots {
   display: inline-flex;
   gap: 10px;
