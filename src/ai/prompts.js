@@ -70,3 +70,38 @@ JSON format exactly (array):
 ]
 `.trim()
 }
+
+/**
+ * ✅ Batch validator prompt (2nd request)
+ * Returns array of booleans same length as items:
+ * true = keep, false = drop
+ */
+export function buildCategoryValidationPrompt({ category, items }) {
+    const safeItems = (items || []).map((x) => ({
+        ru: String(x?.ru || '').trim().toLowerCase(),
+        en: String(x?.en || '').trim().toLowerCase(),
+    }))
+
+    return `
+Return ONLY valid JSON. No markdown. No extra text.
+
+Task:
+You are validating vocabulary pairs for a guessing game.
+
+Target category: "${String(category || '').trim().toLowerCase()}"
+
+For each item, decide if it belongs to the target category AND is a correct translation pair.
+Also reject items that are too generic or clearly belong to another category (e.g. "salamander" for "restaurants").
+
+Rules:
+- Output MUST be a JSON array of booleans, same length and order as input.
+- true = keep (fits category + correct translation + concrete noun)
+- false = reject
+
+Input items:
+${JSON.stringify(safeItems)}
+
+Output format exactly:
+[ true, false, ... ]
+`.trim()
+}
