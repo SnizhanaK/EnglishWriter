@@ -9,9 +9,9 @@ const pressFx =
 // batching
 const PREFETCH_BATCH = 30
 const LOW_WATERMARK = 8
-const PRIME_BATCH = 10 // ✅ always fetch 10 first for new context
+const PRIME_BATCH = 10
 
-// adaptive rules (kept for Round/Score display)
+// adaptive (kept for Round/Score display)
 const WARMUP_SIZE = 10
 const STEP_HARD_SIZE = 30
 const LOOP_SIZE = 40
@@ -37,7 +37,6 @@ const CATEGORY_SUGGESTIONS = [
   'qualities','character traits','advantages','disadvantages','goals','plans','decisions','results',
 ]
 
-// random picker (stable)
 const pickRandom = (arr) => {
   if (!arr.length) return ''
   const n = crypto.getRandomValues(new Uint32Array(1))[0]
@@ -45,23 +44,27 @@ const pickRandom = (arr) => {
 }
 
 const normalizeCategory = (v) => String(v || '').trim().toLowerCase()
+
 const normalizeSpaces = (s) => String(s || '').replace(/\s+/g, ' ').trim()
 const normalizeDashes = (s) =>
     String(s || '')
-        .replace(/[‐-‒–—−]/g, '-') // dash variants -> '-'
-        .replace(/\s*-\s*/g, '-') // remove spaces around '-'
+        .replace(/[‐-‒–—−]/g, '-')
+        .replace(/\s*-\s*/g, '-')
 
 const normalizePair = (ru, en) => {
-  const ruN = normalizeSpaces(normalizeDashes(ru))
+  const ruN = normalizeSpaces(normalizeDashes(ru)).toLowerCase()
   const enN = normalizeSpaces(normalizeDashes(en)).toLowerCase()
   return { ru: ruN, en: enN }
 }
 
-// ✅ allow phrases + hyphens + apostrophes in EN
-const isValidEnglish = (en) => {
+const isValidEn = (en) => {
   const s = normalizeSpaces(normalizeDashes(en)).toLowerCase()
-  // letters, spaces, hyphens, apostrophes
   return /^[a-z]+(?:[ '-][a-z]+)*$/.test(s)
+}
+
+const isValidRu = (ru) => {
+  const s = normalizeSpaces(normalizeDashes(ru)).toLowerCase()
+  return /^[а-яё]+(?:[ -][а-яё]+)*$/i.test(s)
 }
 
 const isLetter = (ch) => /^[a-zA-Z]$/.test(ch)
@@ -71,8 +74,7 @@ const apiKey = ref('')
 const isApiKeyVisible = ref(false)
 const isEditingCategory = ref(false)
 
-// user-selected difficulty; reset to medium on category change
-const difficulty = ref('medium') // 'easy' | 'medium' | 'hard'
+const difficulty = ref('medium') // easy | medium | hard
 const suppressDifficultyWatch = ref(false)
 
 const categoryInput = ref(null)
@@ -81,14 +83,16 @@ const keyInput = ref(null)
 const ruWord = ref('')
 const enWord = ref('')
 
-const isLoading = ref(false)
-const isWaitingWord = ref(false)
 const error = ref('')
 
-// unified lock to prevent races
-const loadLock = ref(false)
+// ✅ no more infinite loading: count active requests
+const pending = ref(0)
+const showLoadingDots = computed(() => pending.value > 0)
 
-// scoring / word state
+// token to ignore stale async results
+const runId = ref(0)
+
+// word state
 const confirmed = ref(false)
 const selectedIndex = ref(null)
 const cursorIndex = ref(null)
@@ -109,14 +113,9 @@ const isPrefetching = ref(false)
 // help underline
 const helpHintIndex = ref(null)
 let helpHintTimer = null
-
-// auto-next timer
 let autoNextTimer = null
 
-// run token to ignore stale async results
-const runId = ref(0)
-
-// stage state (kept for Round/Score display)
+// stage state (display only)
 const stage = ref({
   difficulty: 'medium',
   remaining: WARMUP_SIZE,
@@ -126,11 +125,27 @@ const stage = ref({
 })
 const roundNumber = ref(1)
 
-// queue context key
 const queueKey = computed(() => `${normalizeCategory(category.value)}|${difficulty.value}`)
 
-// show 5 dots for any network activity
-const showLoadingDots = computed(() => isWaitingWord.value || isPrefetching.value)
+const withPending = async (fn) => {
+  pending.value += 1
+  try {
+    return await fn()
+  } finally {
+    pending.value = Math.max(0, pending.value - 1)
+  }
+}
+
+const clearAutoNext = () => {
+  if (autoNextTimer) clearTimeout(autoNextTimer)
+  autoNextTimer = null
+}
+
+const clearHelpHint = () => {
+  if (helpHintTimer) clearTimeout(helpHintTimer)
+  helpHintTimer = null
+  helpHintIndex.value = null
+}
 
 const blurAll = () => {
   categoryInput.value?.blur?.()
@@ -144,32 +159,25 @@ const focusCategory = async () => {
   categoryInput.value?.select?.()
 }
 
+const hasKey = () => !!apiKey.value.trim()
+const ensureKeyOrShowError = () => {
+  if (!hasKey()) {
+    error.value = 'Нужен API key'
+    return false
+  }
+  return true
+}
+
 const targetChars = computed(() => (enWord.value || '').split(''))
-
-// ✅ only letters are "fillable" slots; spaces are gaps; hyphens/apostrophes are fixed chars
 const letterIndices = computed(() =>
-    targetChars.value
-        .map((ch, i) => (isLetter(ch) ? i : null))
-        .filter((x) => x !== null),
+    targetChars.value.map((ch, i) => (isLetter(ch) ? i : null)).filter((x) => x !== null),
 )
-
-const clearAutoNext = () => {
-  if (autoNextTimer) clearTimeout(autoNextTimer)
-  autoNextTimer = null
-}
-
-const clearHelpHint = () => {
-  if (helpHintTimer) clearTimeout(helpHintTimer)
-  helpHintTimer = null
-  helpHintIndex.value = null
-}
 
 const resetAll = () => {
   confirmed.value = false
   selectedIndex.value = null
   cursorIndex.value = letterIndices.value[0] ?? null
 
-  // auto-fill fixed characters (hyphen, apostrophe, punctuation) and spaces
   guessChars.value = targetChars.value.map((ch) => {
     if (ch === ' ') return ' '
     if (!isLetter(ch)) return ch
@@ -231,7 +239,6 @@ const hintIndex = (i) => {
 }
 
 const onClickSlot = (i) => {
-  if (targetChars.value[i] === ' ') return
   if (!isLetter(targetChars.value[i])) return
   clearHelpHint()
   selectedIndex.value = i
@@ -239,15 +246,7 @@ const onClickSlot = (i) => {
   blurAll()
 }
 
-const hasKey = () => !!apiKey.value.trim()
-const ensureKeyOrShowError = () => {
-  if (!hasKey()) {
-    error.value = 'Нужен API key'
-    return false
-  }
-  return true
-}
-
+// stage helpers (display only)
 const stageSet = (difficultyName, count, phase, { incRound = true } = {}) => {
   stage.value = { difficulty: difficultyName, remaining: count, total: count, correct: 0, phase }
   if (incRound) roundNumber.value += 1
@@ -276,13 +275,12 @@ const stageFinishAndAdvance = () => {
   else stageSet('easy', LOOP_SIZE, 'loop')
 }
 
-// queue helpers
-const resetQueue = () => {
-  queueMeta.value = { key: queueKey.value, items: [] }
-}
 const ensureQueueKey = () => {
   const k = queueKey.value
   if (queueMeta.value.key !== k) queueMeta.value = { key: k, items: [] }
+}
+const resetQueue = () => {
+  queueMeta.value = { key: queueKey.value, items: [] }
 }
 
 const setPair = (r) => {
@@ -298,25 +296,19 @@ const setPair = (r) => {
 const sanitizeBatch = (batch) => {
   const seen = seenEn.value
   const out = []
-
   for (const it of batch || []) {
-    const rawEn = String(it?.en || '')
-    const rawRu = String(it?.ru || '')
-    const { en, ru } = normalizePair(rawRu, rawEn)
-
-    if (!en || !ru) continue
-    if (!isValidEnglish(en)) continue
+    const { ru, en } = normalizePair(it?.ru, it?.en)
+    if (!ru || !en) continue
+    if (!isValidEn(en)) continue
+    if (!isValidRu(ru)) continue
     if (seen.has(en)) continue
-
     seen.add(en)
-    out.push({ en, ru })
+    out.push({ ru, en })
   }
-
   return out
 }
 
-// ✅ fast 1-word fetch to avoid long pause between words
-const fetchOneFast = async () => {
+const fetchBatch = async ({ count }) => {
   const myRun = runId.value
   const myKey = queueKey.value
   const cat = normalizeCategory(category.value)
@@ -324,98 +316,68 @@ const fetchOneFast = async () => {
   const batch = await generateWordBatch({
     apiKey: apiKey.value,
     category: cat || '',
-    count: 1,
+    count,
     difficulty: difficulty.value,
   })
 
-  if (myRun !== runId.value) return null
-  if (myKey !== queueKey.value) return null
+  if (myRun !== runId.value) return { ok: false, items: [] }
+  if (myKey !== queueKey.value) return { ok: false, items: [] }
 
-  const filtered = sanitizeBatch(batch)
-  return filtered[0] || null
+  return { ok: true, items: sanitizeBatch(batch) }
 }
 
-// prime: fetch 10, show first, queue rest, then bg prefetch
-const primeQueueAndShowFirst = async ({ count = PRIME_BATCH } = {}) => {
-  if (!ensureKeyOrShowError()) return false
-
-  ensureQueueKey()
-  const myRun = runId.value
-  const myKey = queueKey.value
-  const cat = normalizeCategory(category.value)
-
-  isWaitingWord.value = true
-  isLoading.value = true
-  try {
-    const batch = await generateWordBatch({
-      apiKey: apiKey.value,
-      category: cat || '',
-      count,
-      difficulty: difficulty.value,
-    })
-
-    if (myRun !== runId.value) return false
-    if (myKey !== queueKey.value) return false
-
-    ensureQueueKey()
-    if (queueMeta.value.key !== myKey) return false
-
-    const filtered = sanitizeBatch(batch)
-    if (!filtered.length) throw new Error('Нет слов')
-
-    const [first, ...rest] = filtered
-    queueMeta.value.items = rest
-    setPair(first)
-
-    prefetch() // bg
-    return true
-  } catch (e) {
-    if (!ruWord.value && !enWord.value) error.value = e?.message || 'Ошибка загрузки'
-    return false
-  } finally {
-    if (myRun === runId.value && myKey === queueKey.value) {
-      isLoading.value = false
-      isWaitingWord.value = false
-    }
-  }
-}
-
-// prefetch batch into queue (background)
 const prefetch = async () => {
   if (isPrefetching.value) return
   if (!hasKey()) return
 
-  ensureQueueKey()
   const myRun = runId.value
   const myKey = queueKey.value
-  const cat = normalizeCategory(category.value)
+  ensureQueueKey()
 
   isPrefetching.value = true
   try {
-    let attempts = 0
-    while (queueMeta.value.items.length < PREFETCH_BATCH && attempts < 3) {
-      attempts += 1
-      const batch = await generateWordBatch({
-        apiKey: apiKey.value,
-        category: cat || '',
-        count: PREFETCH_BATCH,
-        difficulty: difficulty.value,
-      })
-
-      if (myRun !== runId.value) return
-      if (myKey !== queueKey.value) return
-      ensureQueueKey()
-      if (queueMeta.value.key !== myKey) return
-
-      const filtered = sanitizeBatch(batch)
-      queueMeta.value.items.push(...filtered)
-      if (filtered.length > 0) break
-    }
-  } catch (e) {
-    console.warn(e)
+    await withPending(async () => {
+      let attempts = 0
+      while (queueMeta.value.items.length < PREFETCH_BATCH && attempts < 2) {
+        attempts += 1
+        const res = await fetchBatch({ count: PREFETCH_BATCH })
+        if (!res.ok) return
+        if (myRun !== runId.value) return
+        if (myKey !== queueKey.value) return
+        ensureQueueKey()
+        if (queueMeta.value.key !== myKey) return
+        queueMeta.value.items.push(...res.items)
+        if (res.items.length > 0) return
+      }
+    })
   } finally {
     isPrefetching.value = false
   }
+}
+
+const primeQueueAndShowFirst = async ({ count = PRIME_BATCH } = {}) => {
+  if (!ensureKeyOrShowError()) return false
+
+  const myRun = runId.value
+  ensureQueueKey()
+
+  return withPending(async () => {
+    const res = await fetchBatch({ count })
+    if (!res.ok) return false
+    if (myRun !== runId.value) return false
+
+    ensureQueueKey()
+    if (!res.items.length) {
+      error.value = 'Нет слов'
+      return false
+    }
+
+    const [first, ...rest] = res.items
+    queueMeta.value.items = rest
+    setPair(first)
+    prefetch()
+    return true
+  })
 }
 
 const takeFromQueue = async () => {
@@ -427,32 +389,27 @@ const takeFromQueue = async () => {
     return item
   }
 
-  const one = await fetchOneFast()
-  if (one) {
+  const res = await fetchBatch({ count: 1 })
+  if (res.ok && res.items[0]) {
     prefetch()
-    return one
+    return res.items[0]
   }
 
   await prefetch()
   ensureQueueKey()
-
   const item = queueMeta.value.items.shift()
   if (!item) throw new Error('Нет слов')
-
   if (queueMeta.value.items.length <= LOW_WATERMARK) prefetch()
   return item
 }
 
 const loadNextWord = async () => {
-  error.value = ''
   if (!ensureKeyOrShowError()) return false
 
   const myRun = runId.value
   const myKey = queueKey.value
 
-  isWaitingWord.value = true
-  isLoading.value = true
-  try {
+  return withPending(async () => {
     if (stage.value.remaining <= 0) {
       stageFinishAndAdvance()
       resetQueue()
@@ -464,31 +421,24 @@ const loadNextWord = async () => {
 
     setPair(item)
     return true
-  } catch (e) {
-    if (myRun !== runId.value) return false
-    if (myKey !== queueKey.value) return false
-    if (!ruWord.value && !enWord.value) error.value = e?.message || 'Ошибка загрузки'
-    return false
-  } finally {
-    if (myRun === runId.value && myKey === queueKey.value) {
-      isLoading.value = false
-      isWaitingWord.value = false
-    }
-  }
+  })
 }
 
-// hard reset (always when category changes / random)
+// ======= run control =======
+
 const startNewRun = (newCategory) => {
   runId.value += 1
   clearAutoNext()
   clearHelpHint()
 
+  // hard reset loading visuals
+  pending.value = 0
+  isPrefetching.value = false
+
   category.value = normalizeCategory(newCategory || category.value)
 
   suppressDifficultyWatch.value = true
   difficulty.value = 'medium'
-  queueMeta.value = { key: `${normalizeCategory(category.value)}|medium`, items: [] }
-  queueMeta.value.key = queueKey.value
   suppressDifficultyWatch.value = false
 
   seenEn.value = new Set()
@@ -503,38 +453,19 @@ const startNewRun = (newCategory) => {
   blurAll()
 }
 
-// Random: choose category, reset to medium, prime 10
 const onRandom = async () => {
-  if (loadLock.value) return
   if (!ensureKeyOrShowError()) return
-
-  loadLock.value = true
-  error.value = ''
-
-  try {
-    startNewRun(pickRandom(CATEGORY_SUGGESTIONS))
-    await primeQueueAndShowFirst({ count: PRIME_BATCH })
-  } finally {
-    loadLock.value = false
-  }
+  startNewRun(pickRandom(CATEGORY_SUGGESTIONS))
+  await primeQueueAndShowFirst({ count: PRIME_BATCH })
 }
 
-// Pencil apply: reset to medium, prime 10
 const applyCategoryAndLoad = async () => {
-  if (loadLock.value) return
   if (!ensureKeyOrShowError()) return
-
-  loadLock.value = true
   isEditingCategory.value = false
   blurAll()
-  error.value = ''
 
-  try {
-    startNewRun(category.value)
-    await primeQueueAndShowFirst({ count: PRIME_BATCH })
-  } finally {
-    loadLock.value = false
-  }
+  startNewRun(category.value)
+  await primeQueueAndShowFirst({ count: PRIME_BATCH })
 }
 
 const onEdit = async () => {
@@ -542,27 +473,26 @@ const onEdit = async () => {
   await focusCategory()
 }
 
-// when user changes difficulty: same category, reload immediately with PRIME_BATCH=10
+// difficulty change => reload immediately (same category)
 watch(difficulty, async () => {
   if (suppressDifficultyWatch.value) return
+  if (!hasKey()) return
+  if (!category.value) return
 
-  resetQueue()
   runId.value += 1
   clearAutoNext()
   clearHelpHint()
+  pending.value = 0
+  isPrefetching.value = false
+
+  seenEn.value = new Set()
+  resetQueue()
   error.value = ''
 
-  if (!hasKey()) return
-  if (loadLock.value) return
-  if (!category.value) return
-
-  loadLock.value = true
-  try {
-    await primeQueueAndShowFirst({ count: PRIME_BATCH })
-  } finally {
-    loadLock.value = false
-  }
+  await primeQueueAndShowFirst({ count: PRIME_BATCH })
 })
+
+// ======= actions =======
 
 const onHelp = () => {
   if (!enWord.value) return
@@ -619,33 +549,33 @@ const onConfirm = () => {
   blurAll()
 }
 
-// Next = Skip (does not change remaining if next didn't load)
+// Next = Skip: remaining decreases only if next word actually loaded
 const onSkip = async () => {
-  if (loadLock.value) return
   if (!ensureKeyOrShowError()) return
   if (!enWord.value) return
 
-  loadLock.value = true
   usedHelpForWord.value = true
   confirmed.value = false
   clearHelpHint()
   clearAutoNext()
+
   wordCompleted.value = true
 
   try {
     const ok = await loadNextWord()
     if (ok) stage.value.remaining -= 1
     else wordCompleted.value = false
-  } finally {
-    loadLock.value = false
+  } catch (e) {
+    wordCompleted.value = false
+    error.value = e?.message || 'Ошибка загрузки'
   }
 }
 
-// auto-next if ALL GREEN; score only if first confirm and no help
+// auto-next on all correct
 watch(
-    () => [confirmTick.value, isAllCorrect.value, isLoading.value, enWord.value],
-    ([, allCorrect, loading]) => {
-      if (loading || !enWord.value) return
+    () => [confirmTick.value, isAllCorrect.value, pending.value, enWord.value],
+    ([, allCorrect, p]) => {
+      if (p > 0 || !enWord.value) return
       if (!confirmed.value) return
       if (!allCorrect) return
       if (wordCompleted.value) return
@@ -659,13 +589,13 @@ watch(
 
       clearAutoNext()
       autoNextTimer = setTimeout(() => {
-        if (confirmed.value && !isLoading.value && !loadLock.value) loadNextWord()
+        if (confirmed.value && pending.value === 0) loadNextWord()
       }, 350)
     }
 )
 
 const onEnter = async (e) => {
-  if (isLoading.value) return
+  if (pending.value > 0) return
   e.preventDefault()
   onConfirm()
 }
@@ -720,13 +650,10 @@ const onKeydown = async (e) => {
     }
 
     moveCursorToPrev(idx)
-    if (cursorIndex.value !== null && isLetter(targetChars.value[cursorIndex.value])) {
-      guessChars.value[cursorIndex.value] = ''
-    }
+    if (cursorIndex.value !== null && isLetter(targetChars.value[cursorIndex.value])) guessChars.value[cursorIndex.value] = ''
     return
   }
 
-  // letters
   if (/^[a-zA-Z]$/.test(key)) {
     e.preventDefault()
     confirmed.value = false
@@ -741,7 +668,6 @@ const onKeydown = async (e) => {
     return
   }
 
-  // ✅ allow typing '-' or "'" only if target expects it (usually auto-filled anyway)
   if (key === '-' || key === "'") {
     if (targetChars.value[idx] !== key) return
 
@@ -818,7 +744,6 @@ onBeforeUnmount(() => {
               @click="onRandom"
               class="p-2 border border-black"
               :class="pressFx"
-              :disabled="isLoading"
               title="Random category + start"
           >
             <RefreshCcw class="h-6 w-6 sm:h-7 sm:w-7" />
@@ -880,11 +805,19 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="flex flex-wrap justify-center gap-3 sm:gap-6 py-6 sm:py-10">
-        <button @click="onClean" class="w-40 sm:w-64 py-4 sm:py-6 border border-black text-2xl sm:text-4xl font-light" :class="pressFx">
+        <button
+            @click="onClean"
+            class="w-40 sm:w-64 py-4 sm:py-6 border border-black text-2xl sm:text-4xl font-light"
+            :class="pressFx"
+        >
           Clean
         </button>
 
-        <button @click="onHelp" class="w-40 sm:w-64 py-4 sm:py-6 border border-black text-2xl sm:text-4xl font-light" :class="pressFx">
+        <button
+            @click="onHelp"
+            class="w-40 sm:w-64 py-4 sm:py-6 border border-black text-2xl sm:text-4xl font-light"
+            :class="pressFx"
+        >
           Help
         </button>
 
@@ -900,7 +833,7 @@ onBeforeUnmount(() => {
             @click="onSkip"
             class="w-40 sm:w-64 py-4 sm:py-6 border border-black text-2xl sm:text-4xl font-light"
             :class="pressFx"
-            :disabled="isLoading"
+            :disabled="pending > 0"
         >
           Next
         </button>
@@ -923,6 +856,7 @@ button:focus-visible {
 * {
   -webkit-tap-highlight-color: transparent;
 }
+
 .loading-dots {
   display: inline-flex;
   gap: 10px;
