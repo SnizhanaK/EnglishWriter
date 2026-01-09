@@ -31,10 +31,11 @@ async function callGemini({ apiKey, prompt }) {
     return res.json()
 }
 
-export async function generateWordPair({ apiKey, category }) {
+export async function generateWordPair({ apiKey, category, difficulty = 'medium' }) {
     const prompt = buildWordPrompt({
         mode: category ? 'category' : 'random',
         category,
+        difficulty,
     })
 
     const data = await callGemini({ apiKey, prompt })
@@ -47,11 +48,12 @@ export async function generateWordPair({ apiKey, category }) {
     }
 }
 
-export async function generateWordBatch({ apiKey, category, count = 20 }) {
+export async function generateWordBatch({ apiKey, category, count = 20, difficulty = 'medium' }) {
     const prompt = buildWordBatchPrompt({
         mode: category ? 'category' : 'random',
         category,
         count,
+        difficulty,
     })
 
     const data = await callGemini({ apiKey, prompt })
@@ -69,6 +71,7 @@ export async function generateWordBatch({ apiKey, category, count = 20 }) {
         .filter((x) => /^[a-z]+$/.test(x.en))
         .filter((x) => /^[а-яё]+$/i.test(x.ru))
 
+    // unique inside batch
     const seen = new Set()
     const unique = []
     for (const it of cleaned) {
